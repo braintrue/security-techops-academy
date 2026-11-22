@@ -1,153 +1,191 @@
-
 # Day 06. TCP Connection & Packet Analysis
 
 ## 1. 학습 목표
 
-TCP 연결 상태와 패킷 흐름을 관찰하고, SSH 통신 과정에서 TCP Flags와 데이터 교환을 분석한다.
-
-- TCP 3-Way Handshake 이해
-- TCP 연결 상태 및 포트 구조 이해
-- tcpdump를 이용한 패킷 캡처
-- TCP Flags 분석
-- SSH 통신의 네트워크 흐름 확인
+- TCP 연결 상태와 주요 플래그 이해
+- `ss`를 이용한 소켓·포트·프로세스 확인
+- `tcpdump`를 이용한 SSH 패킷 캡처
+- TCP SYN 및 SYN-ACK 패킷 분석
+- HTTPS 통신에서 TCP, TLS, HTTP의 역할 구분
 
 ## 2. 실습 환경
 
 | 항목 | 환경 |
 |---|---|
-| Host | MacBook Air M2 |
+| Host OS | macOS |
+| Host Device | MacBook Air M2 (8GB) |
 | Virtualization | UTM |
 | Guest OS | Ubuntu Server ARM64 |
-| CPU | 2 vCPU |
-| RAM | 약 1.6 GiB |
+| VM CPU | 2 vCPU |
+| VM Memory | 약 1.6 GiB |
 | Network Interface | enp0s1 |
-| SSH Server | 192.168.64.3 |
+| Ubuntu IP | 192.168.64.3 |
+| Mac IP | 192.168.64.1 |
 | SSH Port | TCP 22 |
 
-## 3. TCP 연결 구조
+Mac 터미널에서 SSH로 Ubuntu 서버에 접속해 실습했다.
 
-TCP 3-Way Handshake는 다음 순서로 진행된다.
+## 3. TCP 연결 상태 확인
 
-1. SYN: 클라이언트가 연결 요청
-2. SYN-ACK: 서버가 요청에 응답
-3. ACK: 클라이언트가 응답을 확인
-
-주요 TCP Flags:
-
-| Flag | 의미 |
-|---|---|
-| SYN | 연결 요청 |
-| ACK | 수신 확인 |
-| PSH | 수신 데이터를 상위 계층으로 전달하도록 요청 |
-| FIN | 정상적인 연결 종료 요청 |
-| RST | 연결 초기화 |
-
-## 4. 실습 명령어
-
-### 4-1. 패킷 캡처 인터페이스 확인
+### 3-1. 전체 TCP 연결
 
 ```bash
-sudo tcpdump -D
+ss -tan
 ```
 
-확인된 인터페이스:
-- enp0s1
-- any
-- lo
-- bluetooth-monitor
-- nflog
-- nfqueue
+SSH 포트 22의 LISTEN 상태와 SSH 접속에 따른 ESTAB 상태를 확인했다.
 
-### 4-2. TCP 패킷 캡처
+- LISTEN: 연결 요청 대기
+- ESTAB: 연결 수립
+- TIME-WAIT: 연결 종료 후 일정 시간 유지
+
+### 3-2. 포트 및 프로세스 확인
 
 ```bash
-sudo tcpdump -i enp0s1 tcp -nn
+sudo ss -tulpen
 ```
 
-SSH 포트만 필터링:
+확인한 주요 항목:
+
+- SSH: TCP 22
+- systemd-resolved: DNS 관련 포트 53
+- chronyd: UDP 323
+- systemd-networkd: UDP 68
+
+SSH 포트에서는 `sshd`와 `systemd`의 Socket Activation 구조도 확인했다.
+
+### 3-3. 소켓 통계
 
 ```bash
-sudo tcpdump -i enp0s1 'tcp port 22' -nn
+ss -s
 ```
 
-옵션 설명:
-
-| 옵션 | 의미 |
-|---|---|
-| -i enp0s1 | 캡처 인터페이스 지정 |
-| tcp | TCP 패킷 필터링 |
-| port 22 | SSH 포트 필터링 |
-| -nn | IP 주소와 포트를 숫자로 표시 |
-
-## 5. 실습 결과
-
-실제 tcpdump 출력에서 다음 통신을 확인했다.
-
-| 항목 | 관찰 결과 |
-|---|---|
-| 서버 주소 | 192.168.64.3:22 |
-| 상대방 주소 | 192.168.64.1:49523 |
-| 프로토콜 | TCP |
-| 관찰된 Flags | ACK, PSH-ACK |
-| 데이터 교환 | 확인 |
-| ACK 패킷 | 확인 |
-
-### 주요 패킷 분석
-
-**1. ACK 패킷**
+실습 당시 주요 출력:
 
 ```text
-Flags [.]
+Total: 187
+TCP: 7 (estab 3, closed 0, orphaned 0, timewait 0)
 ```
 
-ACK 플래그가 설정된 패킷이다. TCP 통신에서 상대방으로부터 받은 데이터의 수신을 확인하는 데 사용된다.
+개별 연결 조회와 전체 소켓 통계 조회의 목적이 다르다는 점을 확인했다.
 
-**2. PSH-ACK 패킷**
+## 4. tcpdump 패킷 캡처
+
+### 4-1. 버전 확인
+
+```bash
+tcpdump --version
+```
+
+확인 결과: tcpdump 4.99.6
+
+### 4-2. 기존 SSH 트래픽 캡처
+
+```bash
+sudo tcpdump -i enp0s1 -nn 'tcp port 22'
+```
+
+- `-i enp0s1`: 캡처 인터페이스 지정
+- `-nn`: 주소와 포트를 숫자로 표시
+- `tcp port 22`: SSH TCP 트래픽 필터링
+
+기존에 수립된 SSH 연결에서 주로 다음 패킷을 확인했다.
+
+- `[.]`: ACK
+- `[P.]`: PSH + ACK
+
+이는 새 연결의 Handshake가 아니라 기존 SSH 세션의 데이터 교환을 관찰한 결과다.
+
+## 5. TCP SYN 및 SYN-ACK 분석
+
+Mac에서 새로운 SSH 연결을 생성한 뒤 Ubuntu에서 SYN 비트가 설정된 패킷을 필터링했다.
+
+```bash
+sudo tcpdump -i enp0s1 -nn -vv 'tcp port 22 and host 192.168.64.1 and (tcp[tcpflags] & tcp-syn != 0)'
+```
+
+실제 캡처 결과:
 
 ```text
-Flags [P.]
+192.168.64.1.50357 > 192.168.64.3.22:
+Flags [SEW], seq 3105961995
+
+192.168.64.3.22 > 192.168.64.1.50357:
+Flags [S.E], seq 2636560138, ack 3105961996
 ```
 
-PSH와 ACK 플래그가 함께 설정된 패킷이다. PSH는 수신 데이터를 상위 계층으로 전달하도록 요청하는 의미를 가진다.
+### 패킷 해석
 
-**3. TCP 데이터 길이**
+| 순서 | 방향 | 관찰 결과 | 의미 |
+|---|---|---|---|
+| 1 | Mac → Ubuntu | `[SEW]` | SYN 및 ECN 관련 플래그 |
+| 2 | Ubuntu → Mac | `[S.E]` | SYN + ACK 및 ECN-Echo |
 
-캡처 화면에서 다음과 같은 데이터 길이를 관찰했다.
+첫 번째 패킷의 클라이언트 초기 시퀀스 번호는 `3105961995`이고, 서버 응답의 ACK 번호는 `3105961996`이다. 즉, 클라이언트의 초기 시퀀스 번호에 1을 더한 값으로 응답했다.
 
-- length 44
-- length 68
-- length 108
-- length 148
-- length 264
-- length 628
-- length 1156
+### 세 번째 ACK가 캡처되지 않은 이유
 
-반면 `length 0`인 패킷은 TCP 페이로드가 없는 패킷이다.
+TCP 3-Way Handshake의 일반적인 순서는 다음과 같다.
 
-## 6. 보안 관점 분석
+1. SYN: 클라이언트의 연결 요청
+2. SYN-ACK: 서버의 응답
+3. ACK: 클라이언트의 최종 확인
 
-이번 실습에서 확인한 내용:
+이번 캡처 필터에는 다음 조건이 포함되어 있었다.
 
-- SSH 서버와 상대방 사이의 양방향 TCP 통신
-- TCP ACK를 통한 수신 확인
-- PSH-ACK를 통한 데이터 전달
-- TCP 페이로드가 포함된 패킷과 페이로드가 없는 패킷의 차이
+```text
+tcp[tcpflags] & tcp-syn != 0
+```
 
-주의할 점:
+따라서 SYN 비트가 없는 세 번째 ACK 패킷은 필터링 대상에서 제외된다. 이번 실습에서는 SYN과 SYN-ACK를 직접 관찰했으며, 마지막 ACK는 직접 캡처하지 않았다.
 
-이번 캡처 화면에는 주로 ACK와 PSH-ACK가 관찰됐다. 따라서 TCP 연결 수립 이후의 데이터 교환을 확인한 것으로 해석했다.
+## 6. HTTPS 연결 과정 확인
 
-SYN → SYN-ACK → ACK의 3-Way Handshake 전체 과정은 제출된 캡처 화면에서 확인되지 않았다.
+### 실행 명령어
 
-또한 이번 결과만으로 비정상 접근이나 공격 여부를 판단할 수는 없다.
+```bash
+curl -v https://ubuntu.com
+```
 
-## 7. 학습 정리
+실습에서 확인한 결과:
 
-이번 실습을 통해 tcpdump로 SSH 통신을 캡처하고 TCP Flags, IP 주소, 포트 번호, 데이터 길이를 확인했다.
+| 항목 | 결과 |
+|---|---|
+| IPv6 연결 | `Network is unreachable` |
+| IPv4 연결 | `185.125.190.21:443` 연결 성공 |
+| TLS | TLS 1.3 |
+| Cipher | `TLS_AES_256_GCM_SHA384` |
+| 인증서 | 검증 성공 |
+| ALPN | HTTP/2 (`h2`) |
+| HTTP 응답 | 200 |
 
-특히 TCP 패킷을 단순히 수집하는 것에서 나아가 각 패킷의 Flags와 통신 방향을 기준으로 연결 상태를 해석하는 방법을 학습했다.
+IPv6 연결 시도는 실패했지만 IPv4 연결에 성공해 HTTPS 응답을 받았다. 이 결과만으로 공격이나 보안 침해를 의미하지는 않는다.
 
-## 8. 다음 학습
+TCP 연결 이후 TLS 협상이 수행되고, 그 위에서 HTTP/2 통신이 이루어지는 흐름을 확인했다.
 
-Day 07에서는 네트워크 트래픽 분석을 확장해 DNS 요청 및 응답, 포트 기반 서비스 식별, 네트워크 통신 로그 분석을 학습할 예정이다.
+## 7. 보안 및 운영 관점
 
+- 예상하지 못한 LISTEN 포트가 있는지 점검한다.
+- ESTAB 연결의 출발지·목적지와 프로세스를 확인한다.
+- TCP 플래그를 통해 연결 수립 및 데이터 교환 흐름을 분석한다.
+- 패킷 필터 조건이 분석 결과에 어떤 영향을 주는지 확인한다.
+- HTTPS 연결에서 TLS 버전과 인증서 검증 결과를 확인한다.
+
+## 8. 학습 정리
+
+| 명령어 | 목적 |
+|---|---|
+| `ss -tan` | TCP 연결 상태 확인 |
+| `sudo ss -tulpen` | 포트 및 프로세스 확인 |
+| `ss -s` | 소켓 상태 요약 |
+| `tcpdump` | 네트워크 패킷 캡처 |
+| `curl -v` | HTTP/TLS 연결 과정 확인 |
+
+### 핵심 정리
+
+- TCP 연결 수립은 SYN → SYN-ACK → ACK 순서로 진행된다.
+- `ss`는 소켓 상태를 확인하고 `tcpdump`는 실제 패킷을 관찰한다.
+- 패킷 필터 조건에 따라 특정 패킷이 캡처 결과에서 제외될 수 있다.
+- HTTPS는 TCP 연결 위에서 TLS 암호화 통신을 수행한다.
+
+**Day 06: TCP Connection & Packet Analysis — Completed**
